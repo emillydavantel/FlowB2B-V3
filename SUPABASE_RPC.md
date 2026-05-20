@@ -8,8 +8,8 @@ Este documento detalha todas as **Remote Procedure Calls (RPCs)** disponíveis n
 
 ```bash
 # Variáveis de ambiente
-SUPABASE_URL="https://asahknimbggpzpoebmej.supabase.co"
-SUPABASE_ANON_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFzYWhrbmltYmdncHpwb2VibWVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTcxODQxNjMsImV4cCI6MjAzMjc2MDE2M30.rYChkMDDU-hdsMK_MxT6tQLCTNj_D6U__jQKIaXCP2U"
+SUPABASE_URL="your_supabase_project_url"
+SUPABASE_ANON_KEY="your_supabase_anon_key"
 ```
 
 ---
