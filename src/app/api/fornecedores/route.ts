@@ -1,0 +1,573 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { createServerSupabaseClient } from '@/lib/supabase'
+import { getCurrentUser } from '@/lib/auth'
+import { requirePermission } from '@/lib/permissions'
+import { BLING_CONFIG, refreshBlingTokens } from '@/lib/bling'
+
+// Interface para o corpo da requisicao
+interface FornecedorRequest {
+  id?: number // Para update
+  empresa_ids?: number[] // Criar em multiplas lojas (Sprint multi-empresa). Se ausente, usa empresa ativa.
+  nome: string
+  nome_fantasia?: string
+  codigo?: string
+  tipo_pessoa: 'J' | 'F'
+  cnpj?: string
+  cpf?: string
+  rg?: string
+  inscricao_estadual?: string
+  ie_isento?: boolean
+  contribuinte?: string
+  codigo_regime_tributario?: string
+  orgao_emissor?: string
+  relacao_venda?: string[]
+  cliente_desde?: string
+  telefone?: string
+  celular?: string
+  email?: string
+  endereco?: {
+    cep?: string
+    logradouro?: string
+    numero?: string
+    complemento?: string
+    bairro?: string
+    cidade?: string
+    uf?: string
+    pais?: string
+  }
+}
+
+// Interface para resposta do Bling
+interface BlingContatoResponse {
+  data: {
+    id: number
+  }
+}
+
+// Funcao para obter e validar o token do Bling
+async function getBlingAccessToken(empresaId: number, supabase: ReturnType<typeof createServerSupabaseClient>) {
+  const { data: tokens, error } = await supabase
+    .from('bling_tokens')
+    .select('access_token, refresh_token, expires_at')
+    .eq('empresa_id', empresaId)
+    .single()
+
+  if (error || !tokens) {
+    throw new Error('Bling nao conectado. Conecte sua conta Bling primeiro.')
+  }
+
+  const expiresAt = new Date(tokens.expires_at)
+  const now = new Date()
+
+  // Se o token expirou ou vai expirar em 5 minutos, renovar
+  if (expiresAt < new Date(now.getTime() + 5 * 60 * 1000)) {
+    try {
+      const newTokens = await refreshBlingTokens(tokens.refresh_token)
+
+      // Atualizar tokens no banco
+      await supabase
+        .from('bling_tokens')
+        .update({
+          access_token: newTokens.access_token,
+          refresh_token: newTokens.refresh_token,
+          expires_at: new Date(Date.now() + newTokens.expires_in * 1000).toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('empresa_id', empresaId)
+
+      return newTokens.access_token
+    } catch (err) {
+      console.error('Erro ao renovar token Bling:', err)
+      throw new Error('Erro ao renovar token do Bling. Reconecte sua conta.')
+    }
+  }
+
+  return tokens.access_token
+}
+
+// Funcao para montar o body do Bling (apenas campos com valor)
+function buildBlingPayload(data: FornecedorRequest) {
+  const payload: Record<string, unknown> = {}
+
+  // Campos obrigatorios
+  if (data.nome) payload.nome = data.nome
+
+  // Situacao - sempre Ativo ao criar/editar
+  payload.situacao = 'A'
+
+  // Campos opcionais - so adiciona se tiver valor
+  if (data.codigo) payload.codigo = data.codigo
+  if (data.nome_fantasia) payload.fantasia = data.nome_fantasia
+  if (data.tipo_pessoa) payload.tipo = data.tipo_pessoa
+
+  // Numero do documento (CNPJ ou CPF) - so envia se tiver valor valido
+  if (data.tipo_pessoa === 'J' && data.cnpj) {
+    const cnpjLimpo = data.cnpj.replace(/\D/g, '')
+    // So envia CNPJ se tiver 14 digitos
+    if (cnpjLimpo.length === 14) {
+      payload.numeroDocumento = cnpjLimpo
+    }
+  } else if (data.tipo_pessoa === 'F' && data.cpf) {
+    const cpfLimpo = data.cpf.replace(/\D/g, '')
+    // So envia CPF se tiver 11 digitos
+    if (cpfLimpo.length === 11) {
+      payload.numeroDocumento = cpfLimpo
+    }
+  }
+
+  // Indicador IE e Inscricao Estadual
+  // 1 = Contribuinte ICMS (IE obrigatoria)
+  // 2 = Contribuinte isento
+  // 9 = Nao contribuinte
+  if (data.ie_isento) {
+    // Se isento, indicador = 2 e nao envia IE
+    payload.indicadorIe = 2
+  } else if (data.contribuinte === '1') {
+    // Contribuinte ICMS - IE obrigatoria
+    payload.indicadorIe = 1
+    if (data.inscricao_estadual) {
+      payload.ie = data.inscricao_estadual.replace(/\D/g, '')
+    }
+  } else if (data.contribuinte === '2') {
+    // Contribuinte isento
+    payload.indicadorIe = 2
+  } else if (data.contribuinte === '9') {
+    // Nao contribuinte
+    payload.indicadorIe = 9
+  }
+
+  // Contato
+  if (data.telefone) payload.telefone = data.telefone
+  if (data.celular) payload.celular = data.celular
+  if (data.email) payload.email = data.email
+
+  // Documentos pessoais
+  if (data.rg) payload.rg = data.rg
+  if (data.orgao_emissor) payload.orgaoEmissor = data.orgao_emissor
+
+  // Endereco - so adiciona se tiver algum campo preenchido
+  if (data.endereco) {
+    const enderecoGeral: Record<string, string> = {}
+
+    if (data.endereco.logradouro) enderecoGeral.endereco = data.endereco.logradouro
+    if (data.endereco.cep) enderecoGeral.cep = data.endereco.cep.replace(/\D/g, '')
+    if (data.endereco.bairro) enderecoGeral.bairro = data.endereco.bairro
+    if (data.endereco.cidade) enderecoGeral.municipio = data.endereco.cidade
+    if (data.endereco.uf) enderecoGeral.uf = data.endereco.uf
+    if (data.endereco.numero) enderecoGeral.numero = data.endereco.numero
+    if (data.endereco.complemento) enderecoGeral.complemento = data.endereco.complemento
+
+    if (Object.keys(enderecoGeral).length > 0) {
+      payload.endereco = { geral: enderecoGeral }
+    }
+  }
+
+  // Tipo de contato - Fornecedor
+  payload.tiposContato = [{ descricao: 'Fornecedor' }]
+
+  return payload
+}
+
+// GET - Listar fornecedores da empresa
+export async function GET() {
+  try {
+    const user = await getCurrentUser()
+    if (!user || !user.empresaId) {
+      return NextResponse.json({ error: 'Nao autenticado' }, { status: 401 })
+    }
+
+    const supabase = createServerSupabaseClient()
+
+    const { data: fornecedores, error } = await supabase
+      .from('fornecedores')
+      .select('id, nome, nome_fantasia, cnpj, cpf, telefone, email')
+      .eq('empresa_id', user.empresaId)
+      .order('nome')
+
+    if (error) throw error
+
+    return NextResponse.json({
+      success: true,
+      fornecedores: fornecedores || [],
+    })
+
+  } catch (error) {
+    console.error('Erro ao listar fornecedores:', error)
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Erro ao listar fornecedores' },
+      { status: 500 }
+    )
+  }
+}
+
+// Resultado da criacao por empresa
+interface CreateResult {
+  empresaId: number
+  status: 'created' | 'created_without_bling' | 'skipped_duplicate' | 'error'
+  id?: number
+  id_bling?: number | null
+  message?: string
+}
+
+// Cria fornecedor em UMA empresa (Bling + Supabase).
+// Nao lanca: retorna objeto CreateResult com status.
+async function createFornecedorInEmpresa(
+  body: FornecedorRequest,
+  empresaId: number,
+  supabase: ReturnType<typeof createServerSupabaseClient>
+): Promise<CreateResult> {
+  try {
+    // Checar duplicata por CNPJ/CPF nessa empresa
+    const numeroDoc = body.tipo_pessoa === 'J'
+      ? body.cnpj?.replace(/\D/g, '')
+      : body.cpf?.replace(/\D/g, '')
+
+    if (numeroDoc) {
+      const { data: existing } = await supabase
+        .from('fornecedores')
+        .select('id')
+        .eq('empresa_id', empresaId)
+        .eq('numerodocumento', numeroDoc)
+        .limit(1)
+        .maybeSingle()
+
+      if (existing) {
+        return {
+          empresaId,
+          status: 'skipped_duplicate',
+          id: existing.id,
+          message: 'Fornecedor com este documento ja existe nesta loja',
+        }
+      }
+    }
+
+    // 1. Obter token do Bling
+    let accessToken: string | null = null
+    try {
+      accessToken = await getBlingAccessToken(empresaId, supabase)
+    } catch (err) {
+      console.warn(`Bling nao disponivel para empresa ${empresaId}:`, err)
+    }
+
+    // 2. Se nao tem Bling, salva so no Supabase
+    if (!accessToken) {
+      const insertData = buildSupabaseData(body, empresaId, null)
+      const { data, error } = await supabase
+        .from('fornecedores')
+        .insert(insertData)
+        .select('id')
+        .single()
+
+      if (error) {
+        return { empresaId, status: 'error', message: error.message }
+      }
+
+      return {
+        empresaId,
+        status: 'created_without_bling',
+        id: data.id,
+        id_bling: null,
+        message: 'Criado apenas localmente (Bling nao conectado)',
+      }
+    }
+
+    // 3. Criar contato no Bling
+    const blingPayload = buildBlingPayload(body)
+    const blingResponse = await fetch(`${BLING_CONFIG.apiUrl}/contatos`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(blingPayload),
+    })
+
+    if (!blingResponse.ok) {
+      const errorText = await blingResponse.text()
+      console.error(`Erro Bling empresa ${empresaId}:`, blingResponse.status, errorText)
+
+      // Fallback: salva so no Supabase
+      const insertData = buildSupabaseData(body, empresaId, null)
+      const { data, error } = await supabase
+        .from('fornecedores')
+        .insert(insertData)
+        .select('id')
+        .single()
+
+      if (error) {
+        return { empresaId, status: 'error', message: error.message }
+      }
+
+      return {
+        empresaId,
+        status: 'created_without_bling',
+        id: data.id,
+        id_bling: null,
+        message: `Bling falhou, salvo localmente: ${errorText.slice(0, 120)}`,
+      }
+    }
+
+    const blingData: BlingContatoResponse = await blingResponse.json()
+    const idBling = blingData.data.id
+
+    // 4. Salvar no Supabase com id_bling
+    const insertData = buildSupabaseData(body, empresaId, idBling)
+    const { data, error } = await supabase
+      .from('fornecedores')
+      .insert(insertData)
+      .select('id')
+      .single()
+
+    if (error) {
+      return { empresaId, status: 'error', message: error.message }
+    }
+
+    return {
+      empresaId,
+      status: 'created',
+      id: data.id,
+      id_bling: idBling,
+    }
+  } catch (err) {
+    return {
+      empresaId,
+      status: 'error',
+      message: err instanceof Error ? err.message : 'Erro desconhecido',
+    }
+  }
+}
+
+// POST - Criar novo fornecedor em uma ou mais empresas vinculadas ao user
+export async function POST(request: NextRequest) {
+  try {
+    const user = await getCurrentUser()
+    if (!user || !user.empresaId) {
+      return NextResponse.json({ error: 'Nao autenticado' }, { status: 401 })
+    }
+
+    const permCheck = await requirePermission(user, 'cadastros')
+    if (!permCheck.allowed) return permCheck.response
+
+    const body: FornecedorRequest = await request.json()
+
+    if (!body.nome) {
+      return NextResponse.json({ error: 'Nome do fornecedor e obrigatorio' }, { status: 400 })
+    }
+
+    const supabase = createServerSupabaseClient()
+
+    // 1. Resolver empresa_ids: usar body.empresa_ids ou fallback pra empresa ativa
+    const requestedIds = Array.isArray(body.empresa_ids) && body.empresa_ids.length > 0
+      ? Array.from(new Set(body.empresa_ids.map(Number).filter(n => Number.isFinite(n) && n > 0)))
+      : [user.empresaId]
+
+    if (requestedIds.length === 0) {
+      return NextResponse.json({ error: 'Nenhuma loja selecionada' }, { status: 400 })
+    }
+
+    // 2. Validacao cross-tenant: garantir que todas as empresas pertencem ao user
+    const { data: vinculos, error: vinculosError } = await supabase
+      .from('users_empresas')
+      .select('empresa_id')
+      .eq('user_id', user.userId)
+      .eq('ativo', true)
+      .in('empresa_id', requestedIds)
+
+    if (vinculosError) {
+      console.error('Erro ao validar vinculos:', vinculosError)
+      return NextResponse.json({ error: 'Erro ao validar lojas' }, { status: 500 })
+    }
+
+    const idsAutorizados = new Set((vinculos || []).map(v => v.empresa_id))
+    const idsNaoAutorizados = requestedIds.filter(id => !idsAutorizados.has(id))
+
+    if (idsNaoAutorizados.length > 0) {
+      return NextResponse.json(
+        { error: `Acesso negado a empresa(s): ${idsNaoAutorizados.join(', ')}` },
+        { status: 403 }
+      )
+    }
+
+    // 3. Loop: criar fornecedor em cada empresa
+    const results: CreateResult[] = []
+    for (const empresaId of requestedIds) {
+      const result = await createFornecedorInEmpresa(body, empresaId, supabase)
+      results.push(result)
+    }
+
+    const summary = {
+      total: results.length,
+      created: results.filter(r => r.status === 'created').length,
+      created_without_bling: results.filter(r => r.status === 'created_without_bling').length,
+      skipped_duplicate: results.filter(r => r.status === 'skipped_duplicate').length,
+      errors: results.filter(r => r.status === 'error').length,
+    }
+
+    // Compat: quando e uma unica empresa (fluxo antigo), retorna shape legada
+    if (results.length === 1) {
+      const r = results[0]
+      if (r.status === 'error') {
+        return NextResponse.json({ error: r.message || 'Erro ao criar fornecedor' }, { status: 500 })
+      }
+      return NextResponse.json({
+        success: true,
+        id: r.id,
+        id_bling: r.id_bling ?? null,
+        message: r.message,
+        results,
+        summary,
+      })
+    }
+
+    return NextResponse.json({
+      success: summary.errors < results.length,
+      results,
+      summary,
+    })
+
+  } catch (error) {
+    console.error('Erro ao criar fornecedor:', error)
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Erro ao criar fornecedor' },
+      { status: 500 }
+    )
+  }
+}
+
+// PUT - Atualizar fornecedor existente (apenas Supabase - Bling nao atualiza)
+export async function PUT(request: NextRequest) {
+  try {
+    const user = await getCurrentUser()
+    if (!user || !user.empresaId) {
+      return NextResponse.json({ error: 'Nao autenticado' }, { status: 401 })
+    }
+
+    const body: FornecedorRequest = await request.json()
+
+    if (!body.id) {
+      return NextResponse.json({ error: 'ID do fornecedor e obrigatorio' }, { status: 400 })
+    }
+
+    if (!body.nome) {
+      return NextResponse.json({ error: 'Nome do fornecedor e obrigatorio' }, { status: 400 })
+    }
+
+    const supabase = createServerSupabaseClient()
+    const empresaId = user.empresaId
+
+    // Verificar se fornecedor existe
+    const { data: existing, error: fetchError } = await supabase
+      .from('fornecedores')
+      .select('id, id_bling')
+      .eq('id', body.id)
+      .eq('empresa_id', empresaId)
+      .single()
+
+    if (fetchError || !existing) {
+      return NextResponse.json({ error: 'Fornecedor nao encontrado' }, { status: 404 })
+    }
+
+    // Atualizar apenas no Supabase
+    const updateData = buildSupabaseData(body, empresaId, existing.id_bling, true)
+    const { error } = await supabase
+      .from('fornecedores')
+      .update(updateData)
+      .eq('id', body.id)
+      .eq('empresa_id', empresaId)
+
+    if (error) throw error
+
+    return NextResponse.json({
+      success: true,
+      id: body.id,
+      id_bling: existing.id_bling,
+      message: 'Fornecedor atualizado com sucesso',
+    })
+
+  } catch (error) {
+    console.error('Erro ao atualizar fornecedor:', error)
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Erro ao atualizar fornecedor' },
+      { status: 500 }
+    )
+  }
+}
+
+// Funcao para montar dados do Supabase (apenas campos com valor)
+function buildSupabaseData(
+  data: FornecedorRequest,
+  empresaId: number,
+  idBling: number | null,
+  isUpdate = false
+) {
+  const result: Record<string, unknown> = {}
+
+  // Campos obrigatorios
+  if (!isUpdate) {
+    result.empresa_id = empresaId
+  }
+
+  if (data.nome !== undefined) result.nome = data.nome
+
+  // So adiciona campos se tiverem valor definido (nao undefined)
+  if (data.nome_fantasia !== undefined && data.nome_fantasia !== '') {
+    result.nome_fantasia = data.nome_fantasia
+  }
+  if (data.codigo !== undefined && data.codigo !== '') {
+    result.codigo = data.codigo
+  }
+  if (data.tipo_pessoa !== undefined) {
+    result.tipo_pessoa = data.tipo_pessoa
+  }
+  if (data.cnpj !== undefined && data.cnpj !== '') {
+    result.cnpj = data.cnpj
+    result.numerodocumento = data.cnpj.replace(/\D/g, '')
+  }
+  if (data.cpf !== undefined && data.cpf !== '') {
+    result.cpf = data.cpf
+    result.numerodocumento = data.cpf.replace(/\D/g, '')
+  }
+  if (data.rg !== undefined && data.rg !== '') {
+    result.rg = data.rg
+  }
+  if (data.inscricao_estadual !== undefined && data.inscricao_estadual !== '') {
+    result.inscricao_estadual = data.inscricao_estadual
+  }
+  if (data.ie_isento !== undefined) {
+    result.ie_isento = data.ie_isento
+  }
+  if (data.contribuinte !== undefined && data.contribuinte !== '') {
+    result.contribuinte = data.contribuinte
+  }
+  if (data.codigo_regime_tributario !== undefined && data.codigo_regime_tributario !== '') {
+    result.cd_regime_tributario = data.codigo_regime_tributario
+  }
+  if (data.orgao_emissor !== undefined && data.orgao_emissor !== '') {
+    result.orgao_emissor = data.orgao_emissor
+  }
+  if (data.relacao_venda !== undefined && data.relacao_venda.length > 0) {
+    result.relacao_venda_fornecedores = data.relacao_venda
+  }
+  if (data.cliente_desde !== undefined && data.cliente_desde !== '') {
+    result.cliente_desde = data.cliente_desde
+  }
+  if (data.telefone !== undefined && data.telefone !== '') {
+    result.telefone = data.telefone
+  }
+  if (data.celular !== undefined && data.celular !== '') {
+    result.celular = data.celular
+  }
+  if (data.email !== undefined && data.email !== '') {
+    result.email = data.email
+  }
+  if (data.endereco !== undefined) {
+    result.endereco = JSON.stringify(data.endereco)
+  }
+
+  // id_bling so na criacao
+  if (!isUpdate && idBling !== null) {
+    result.id_bling = idBling
+  }
+
+  return result
+}

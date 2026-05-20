@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:3000)",
+      "Bash(supabase *)",
+      "Bash(npm install *)",
+      "mcp__claude_ai_Supabase__list_projects",
+      "mcp__claude_ai_Supabase__get_project",
+      "mcp__claude_ai_Supabase__list_tables",
+      "mcp__claude_ai_Supabase__execute_sql",
+      "Bash(chmod +x *)",
+      "mcp__claude_ai_Vercel__list_projects",
+      "Bash(env)",
+      "Bash(npm search *)",
+      "Bash(curl -s https://api.render.com/v1)",
+      "WebFetch(domain:docs.render.com)",
+      "WebFetch(domain:render.com)",
+      "Bash(curl -s https://api.github.com/repos/render-oss/cli/releases/latest)",
+      "Bash(curl *)",
+      "Bash(unzip -q render-cli.zip)",
+      "Bash(./render.exe --version)",
+      "Bash(./render.exe login *)",
+      "Bash(./render.exe services *)",
+      "Bash(./render.exe workspace *)",
+      "Bash(./render.exe --help)",
+      "Bash(./render.exe workspaces *)",
+      "Bash(./render.exe blueprints *)",
+      "Bash(git init *)",
+      "Bash(git config *)",
+      "Bash(git add *)"
+    ]
+  }
+}

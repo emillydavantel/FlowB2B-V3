@@ -1,0 +1,20 @@
+# ===========================================
+# Render.com Configuration para FlowB2B
+# ===========================================
+
+services:
+  # Produção
+  - type: web
+    name: flowb2b-frontend-prod
+    repo: https://github.com/wayidiomas/Flowb2b_v2.git
+    runtime: node
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BLING_CLIENT_ID
+        value: 2abf4c9c9645a7a08016d39c71f0b5d458b799d9
+    branch: main
+    healthCheckPath: /api/health
+    autoDeploy: true

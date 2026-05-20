@@ -1,0 +1,250 @@
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import { jwtVerify } from 'jose'
+
+const JWT_SECRET = new TextEncoder().encode(
+  process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET || 'fallback-secret-change-in-production'
+)
+
+const COOKIE_NAME = 'flowb2b-auth-token'
+
+// Rotas publicas (nao precisam de autenticacao)
+const publicRoutes = [
+  '/',
+  '/login',
+  '/register',
+  '/forgot-password',
+  '/reset-senha',
+  '/verify-email',
+  '/check-email',
+  '/termos-de-uso',
+  '/politica-privacidade',
+  '/fornecedor/login',
+  '/fornecedor/registro',
+  '/representante/login',
+  '/representante/registro',
+  '/representante/convite',
+  '/publico',
+  '/fornecedores',
+  '/catalogo',
+  '/lp',
+]
+
+// Rotas de API publicas
+const publicApiRoutes = [
+  '/api/auth/login',
+  '/api/auth/register',
+  '/api/auth/me',
+  '/api/auth/forgot-password',
+  '/api/auth/reset-password',
+  '/api/auth/magic-link',
+  '/api/auth/verify-magic-link',
+  '/api/auth/verify-email',
+  '/api/auth/fornecedor/login',
+  '/api/auth/fornecedor/registro',
+  '/api/auth/representante/login',
+  '/api/auth/representante/registro',
+  '/api/auth/representante/convite',
+  '/api/cron/',
+  '/api/diagnostico/',
+  '/api/catalogo/',
+  '/api/lp/',
+]
+
+// Padroes de API publicas (com regex)
+const publicApiPatterns = [
+  /^\/api\/pedidos-compra\/\d+\/publico$/,  // /api/pedidos-compra/123/publico
+]
+
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl
+
+  // Permitir rotas públicas
+  if (publicRoutes.some(route => route === '/' ? pathname === '/' : pathname.startsWith(route))) {
+    return NextResponse.next()
+  }
+
+  // Permitir rotas de API públicas
+  if (publicApiRoutes.some(route => pathname.startsWith(route))) {
+    return NextResponse.next()
+  }
+
+  // Permitir rotas de API publicas por padrao (regex)
+  if (publicApiPatterns.some(pattern => pattern.test(pathname))) {
+    return NextResponse.next()
+  }
+
+  // Permitir arquivos estáticos
+  if (
+    pathname.startsWith('/_next') ||
+    pathname.startsWith('/favicon') ||
+    pathname.includes('.')
+  ) {
+    return NextResponse.next()
+  }
+
+  // Verificar token de autenticação
+  const token = request.cookies.get(COOKIE_NAME)?.value
+
+  if (!token) {
+    // Redirecionar para login apropriado se nao estiver autenticado
+    const isFornecedorRoute = pathname.startsWith('/fornecedor') || pathname.startsWith('/api/fornecedor')
+    const isRepresentanteRoute = pathname.startsWith('/representante') || pathname.startsWith('/api/representante')
+    let loginPath = '/login'
+    if (isFornecedorRoute) {
+      loginPath = '/fornecedor/login'
+    } else if (isRepresentanteRoute) {
+      loginPath = '/representante/login'
+    }
+    const loginUrl = new URL(loginPath, request.url)
+    loginUrl.searchParams.set('redirect', pathname)
+    return NextResponse.redirect(loginUrl)
+  }
+
+  try {
+    // Verificar se o token e valido
+    const { payload } = await jwtVerify(token, JWT_SECRET)
+
+    const userTipo = String(payload.tipo || 'lojista')
+
+    // Super admin tem acesso total a /admin/* e /api/admin/*
+    const isAdminRoute = pathname.startsWith('/admin') || pathname.startsWith('/api/admin')
+    if (isAdminRoute && userTipo !== 'superadmin') {
+      // Redirecionar para dashboard do tipo correspondente
+      const redirectMap: Record<string, string> = {
+        lojista: '/dashboard',
+        fornecedor: '/fornecedor/dashboard',
+        representante: '/representante/dashboard',
+      }
+      return NextResponse.redirect(new URL(redirectMap[userTipo] || '/login', request.url))
+    }
+
+    // Super admin acessando rota que nao eh /admin — permitir (ele pode ver tudo)
+    if (userTipo === 'superadmin' && !isAdminRoute) {
+      // Super admin tentando acessar rota de outro portal — redirecionar para /admin
+      const requestHeaders = new Headers(request.headers)
+      requestHeaders.set('x-user-id', String(payload.userId))
+      requestHeaders.set('x-empresa-id', String(payload.empresaId))
+      requestHeaders.set('x-user-role', String(payload.role))
+      requestHeaders.set('x-user-tipo', userTipo)
+      // Para rotas raiz (/) redirecionar para admin dashboard
+      if (pathname === '/') {
+        return NextResponse.redirect(new URL('/admin/dashboard', request.url))
+      }
+      return NextResponse.next({ request: { headers: requestHeaders } })
+    }
+
+    // Protecao por tipo de usuario
+    // IMPORTANTE: /api/fornecedores (lojista) != /api/fornecedor/* (portal fornecedor)
+    // IMPORTANTE: /api/representantes (lojista) != /api/representante/* (portal representante)
+    const isFornecedorRoute = pathname.startsWith('/fornecedor') ||
+      (pathname.startsWith('/api/fornecedor') && !pathname.startsWith('/api/fornecedores'))
+    const isRepresentanteRoute = pathname.startsWith('/representante') ||
+      (pathname.startsWith('/api/representante') && !pathname.startsWith('/api/representantes'))
+    const isLojistaRoute = pathname.startsWith('/compras') || pathname.startsWith('/dashboard') ||
+      pathname.startsWith('/estoque') || pathname.startsWith('/vendas') ||
+      pathname.startsWith('/configuracoes') || pathname.startsWith('/api/pedidos-compra') ||
+      pathname.startsWith('/api/produtos') || pathname.startsWith('/api/fornecedores') ||
+      pathname.startsWith('/api/representantes') || pathname.startsWith('/cadastros') ||
+      pathname.startsWith('/api/dashboard') || pathname.startsWith('/api/auth/bling') ||
+      pathname.startsWith('/api/estoque') || pathname.startsWith('/api/compras') ||
+      pathname.startsWith('/api/convites')
+
+    // Representante tentando acessar rota de lojista
+    if (userTipo === 'representante' && isLojistaRoute) {
+      return NextResponse.redirect(new URL('/representante/dashboard', request.url))
+    }
+
+    // Representante tentando acessar rota de fornecedor
+    if (userTipo === 'representante' && isFornecedorRoute) {
+      return NextResponse.redirect(new URL('/representante/dashboard', request.url))
+    }
+
+    // Fornecedor tentando acessar rota de lojista
+    if (userTipo === 'fornecedor' && isLojistaRoute) {
+      return NextResponse.redirect(new URL('/fornecedor/dashboard', request.url))
+    }
+
+    // Fornecedor tentando acessar rota de representante
+    if (userTipo === 'fornecedor' && isRepresentanteRoute) {
+      return NextResponse.redirect(new URL('/fornecedor/dashboard', request.url))
+    }
+
+    // Lojista tentando acessar rota de fornecedor
+    if (userTipo === 'lojista' && isFornecedorRoute) {
+      return NextResponse.redirect(new URL('/dashboard', request.url))
+    }
+
+    // Lojista tentando acessar rota de representante
+    if (userTipo === 'lojista' && isRepresentanteRoute) {
+      return NextResponse.redirect(new URL('/dashboard', request.url))
+    }
+
+    // Lojista_lp (cadastrado por fornecedor): so acessa LP, catalogo, pedidos, perfil
+    const userRole = String(payload.role || 'user')
+    if (userTipo === 'lojista' && userRole === 'lojista_lp') {
+      const allowedPrefixes = [
+        '/dashboard',
+        '/compras/catalogo',
+        '/compras/pedidos',
+        '/lp/',
+        '/perfil',
+        '/trocar-senha',
+        '/configuracoes/perfil',
+        // APIs necessarias
+        '/api/auth/',
+        '/api/compras/catalogo',
+        '/api/pedidos-compra',
+        '/api/produtos',
+        '/api/fornecedores',
+        '/api/lp/',
+        '/api/notifications',
+        '/api/empresas/',
+        '/api/lojista/',
+      ]
+      const isAllowed = allowedPrefixes.some(prefix => pathname.startsWith(prefix))
+      if (!isAllowed) {
+        return NextResponse.redirect(new URL('/dashboard', request.url))
+      }
+    }
+
+    // Adicionar informacoes do usuario nos headers para uso nas API routes
+    const requestHeaders = new Headers(request.headers)
+    requestHeaders.set('x-user-id', String(payload.userId))
+    requestHeaders.set('x-empresa-id', String(payload.empresaId))
+    requestHeaders.set('x-user-role', String(payload.role))
+    requestHeaders.set('x-user-tipo', userTipo)
+    if (payload.cnpj) {
+      requestHeaders.set('x-user-cnpj', String(payload.cnpj))
+    }
+
+    return NextResponse.next({
+      request: {
+        headers: requestHeaders,
+      },
+    })
+  } catch {
+    // Token invalido - redirecionar para login
+    let loginPath = '/login'
+    if (pathname.startsWith('/fornecedor')) {
+      loginPath = '/fornecedor/login'
+    } else if (pathname.startsWith('/representante')) {
+      loginPath = '/representante/login'
+    }
+    const response = NextResponse.redirect(new URL(loginPath, request.url))
+    response.cookies.delete(COOKIE_NAME)
+    return response
+  }
+}
+
+export const config = {
+  matcher: [
+    /*
+     * Match all request paths except:
+     * - _next/static (static files)
+     * - _next/image (image optimization files)
+     * - favicon.ico (favicon file)
+     */
+    '/((?!_next/static|_next/image|favicon.ico).*)',
+  ],
+}

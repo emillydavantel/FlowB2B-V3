@@ -1,0 +1,648 @@
+'use client'
+
+import { useState, useEffect } from 'react'
+import { useParams } from 'next/navigation'
+import { FornecedorConviteModal } from '@/components/fornecedor/FornecedorConviteModal'
+import { RepresentanteConviteModal } from '@/components/representante/RepresentanteConviteModal'
+
+interface ItemPedido {
+  codigo_produto?: string
+  codigo_fornecedor?: string
+  ean?: string
+  descricao: string
+  unidade: string
+  quantidade: number
+  valor: number
+}
+
+interface Parcela {
+  valor: number
+  data_vencimento: string
+  forma_pagamento_nome?: string
+}
+
+interface RepresentanteInfo {
+  id: number
+  codigo_acesso: string
+  nome: string
+}
+
+interface PedidoPublico {
+  id: number
+  numero: string
+  data: string
+  data_prevista?: string
+  fornecedor_nome: string
+  situacao: number
+  total_produtos: number
+  total: number
+  desconto?: number
+  frete?: number
+  frete_por_conta?: string
+  transportador?: string
+  observacoes?: string
+  representante?: RepresentanteInfo | null
+  itens: ItemPedido[]
+  parcelas: Parcela[]
+}
+
+// Status config
+const STATUS_CONFIG: Record<number, { bg: string; text: string; label: string }> = {
+  0: { bg: 'bg-blue-100', text: 'text-blue-700', label: 'Em Aberto' },
+  1: { bg: 'bg-green-100', text: 'text-green-700', label: 'Atendido' },
+  2: { bg: 'bg-red-100', text: 'text-red-700', label: 'Cancelado' },
+  3: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'Em Andamento' },
+}
+
+// Icons
+function DownloadIcon() {
+  return (
+    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+    </svg>
+  )
+}
+
+function PrintIcon() {
+  return (
+    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0110.56 0m-10.56 0L6.34 18m10.94-4.171c.24.03.48.062.72.096m-.72-.096L17.66 18m0 0l.229 2.523a1.125 1.125 0 01-1.12 1.227H7.231c-.662 0-1.18-.568-1.12-1.227L6.34 18m11.318 0h1.091A2.25 2.25 0 0021 15.75V9.456c0-1.081-.768-2.015-1.837-2.175a48.055 48.055 0 00-1.913-.247M6.34 18H5.25A2.25 2.25 0 013 15.75V9.456c0-1.081.768-2.015 1.837-2.175a48.041 48.041 0 011.913-.247m10.5 0a48.536 48.536 0 00-10.5 0m10.5 0V3.375c0-.621-.504-1.125-1.125-1.125h-8.25c-.621 0-1.125.504-1.125 1.125v3.659M18 10.5h.008v.008H18V10.5zm-3 0h.008v.008H15V10.5z" />
+    </svg>
+  )
+}
+
+function ChatBubbleIcon() {
+  return (
+    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" />
+    </svg>
+  )
+}
+
+function ArrowRightIcon() {
+  return (
+    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+    </svg>
+  )
+}
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL'
+  }).format(value)
+}
+
+function formatDate(dateStr: string) {
+  if (!dateStr) return '-'
+  const date = new Date(dateStr + 'T00:00:00')
+  return date.toLocaleDateString('pt-BR')
+}
+
+// Mapeamento de frete
+const FRETE_LABELS: Record<string, string> = {
+  'CIF': 'CIF - Fornecedor entrega',
+  'FOB': 'FOB - Comprador paga frete',
+  'TERCEIROS': 'Terceiros',
+  'PROPRIO_REMETENTE': 'Proprio do remetente',
+  'PROPRIO_DESTINATARIO': 'Proprio do destinatario',
+  'SEM_FRETE': 'Sem frete',
+}
+
+export default function PedidoPublicoPage() {
+  const params = useParams()
+  const pedidoId = params.id as string
+
+  const [pedido, setPedido] = useState<PedidoPublico | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [showExportMenu, setShowExportMenu] = useState(false)
+  const [showConviteModal, setShowConviteModal] = useState(false)
+  const [showRepresentanteModal, setShowRepresentanteModal] = useState(false)
+
+  // Abrir modal de convite apos 3 segundos
+  useEffect(() => {
+    if (pedido && !loading) {
+      const timer = setTimeout(() => {
+        // Verificar se o usuario ja fechou o modal antes (localStorage)
+        const modalDismissed = localStorage.getItem(`convite-modal-dismissed-${pedidoId}`)
+        if (!modalDismissed) {
+          // Se tem representante, mostrar modal de representante, senao fornecedor
+          if (pedido.representante) {
+            setShowRepresentanteModal(true)
+          } else {
+            setShowConviteModal(true)
+          }
+        }
+      }, 3000)
+      return () => clearTimeout(timer)
+    }
+  }, [pedido, loading, pedidoId])
+
+  const handleCloseConviteModal = () => {
+    setShowConviteModal(false)
+    setShowRepresentanteModal(false)
+    // Salvar que o usuario fechou o modal para nao mostrar de novo
+    localStorage.setItem(`convite-modal-dismissed-${pedidoId}`, 'true')
+  }
+
+  // Buscar pedido
+  useEffect(() => {
+    async function fetchPedido() {
+      try {
+        const response = await fetch(`/api/pedidos-compra/${pedidoId}/publico`)
+        if (!response.ok) {
+          throw new Error('Pedido nao encontrado')
+        }
+        const data = await response.json()
+        setPedido(data)
+      } catch (err) {
+        console.error('Erro ao buscar pedido:', err)
+        setError('Pedido nao encontrado ou link invalido')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    if (pedidoId) {
+      fetchPedido()
+    }
+  }, [pedidoId])
+
+  // Exportar PDF
+  const handleExportPDF = () => {
+    window.print()
+    setShowExportMenu(false)
+  }
+
+  // Exportar CSV
+  const handleExportCSV = () => {
+    if (!pedido) return
+
+    const headers = ['Codigo', 'Descricao', 'Unidade', 'Quantidade', 'Valor Unitario', 'Valor Total']
+    const rows = pedido.itens.map(item => [
+      item.codigo_produto || '',
+      item.descricao,
+      item.unidade,
+      item.quantidade.toString(),
+      item.valor.toFixed(2),
+      (item.quantidade * item.valor).toFixed(2)
+    ])
+
+    const csvContent = [
+      `Pedido #${pedido.numero} - ${pedido.fornecedor_nome}`,
+      `Data: ${formatDate(pedido.data)}`,
+      '',
+      headers.join(';'),
+      ...rows.map(row => row.join(';')),
+      '',
+      `Total Produtos;;;;;${pedido.total_produtos.toFixed(2)}`,
+      `Frete;;;;;${pedido.frete?.toFixed(2) || '0.00'}`,
+      `Desconto;;;;;${pedido.desconto?.toFixed(2) || '0.00'}`,
+      `TOTAL;;;;;${pedido.total.toFixed(2)}`
+    ].join('\n')
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = `pedido_${pedido.numero}_${pedido.fornecedor_nome.replace(/\s+/g, '_')}.csv`
+    link.click()
+    setShowExportMenu(false)
+  }
+
+  // Exportar XLSX
+  const handleExportXLSX = () => {
+    if (!pedido) return
+
+    const headers = ['Codigo', 'Descricao', 'Unidade', 'Quantidade', 'Valor Unitario', 'Valor Total']
+    const rows = pedido.itens.map(item => [
+      item.codigo_produto || '',
+      item.descricao,
+      item.unidade,
+      item.quantidade,
+      item.valor,
+      item.quantidade * item.valor
+    ])
+
+    const content = [
+      `Pedido #${pedido.numero} - ${pedido.fornecedor_nome}`,
+      `Data: ${formatDate(pedido.data)}`,
+      '',
+      headers.join('\t'),
+      ...rows.map(row => row.join('\t')),
+      '',
+      `Total Produtos\t\t\t\t\t${pedido.total_produtos}`,
+      `Frete\t\t\t\t\t${pedido.frete || 0}`,
+      `Desconto\t\t\t\t\t${pedido.desconto || 0}`,
+      `TOTAL\t\t\t\t\t${pedido.total}`
+    ].join('\n')
+
+    const blob = new Blob([content], { type: 'application/vnd.ms-excel;charset=utf-8;' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = `pedido_${pedido.numero}_${pedido.fornecedor_nome.replace(/\s+/g, '_')}.xlsx`
+    link.click()
+    setShowExportMenu(false)
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#336FB6]"></div>
+      </div>
+    )
+  }
+
+  if (error || !pedido) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <h1 className="text-2xl font-bold text-gray-900 mb-2">Pedido nao encontrado</h1>
+          <p className="text-gray-500">{error || 'O link pode estar invalido ou expirado.'}</p>
+        </div>
+      </div>
+    )
+  }
+
+  const statusConfig = STATUS_CONFIG[pedido.situacao] || STATUS_CONFIG[0]
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <header className="bg-white border-b border-gray-200 print:hidden">
+        <div className="max-w-5xl mx-auto px-4 py-4 sm:px-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-xl font-bold text-gray-900">
+                Pedido de Compra #{pedido.numero}
+              </h1>
+              <p className="text-sm text-gray-500">{pedido.fornecedor_nome}</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className={`px-3 py-1 rounded-full text-sm font-medium ${statusConfig.bg} ${statusConfig.text}`}>
+                {statusConfig.label}
+              </span>
+              {/* Menu Exportar */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowExportMenu(!showExportMenu)}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-[#336FB6] hover:bg-[#2660A5] text-white rounded-lg font-medium transition-colors"
+                >
+                  <DownloadIcon />
+                  Exportar
+                </button>
+                {showExportMenu && (
+                  <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-10">
+                    <button
+                      onClick={handleExportPDF}
+                      className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <PrintIcon />
+                      Exportar PDF
+                    </button>
+                    <button
+                      onClick={handleExportCSV}
+                      className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <DownloadIcon />
+                      Exportar CSV
+                    </button>
+                    <button
+                      onClick={handleExportXLSX}
+                      className="w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <DownloadIcon />
+                      Exportar Excel
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Banner CTA - Representante ou Fornecedor */}
+      {pedido.representante ? (
+        <div className="bg-gradient-to-r from-violet-500 to-purple-600 print:hidden">
+          <div className="max-w-5xl mx-auto px-4 py-4 sm:px-6">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3 text-white">
+                <div className="p-2 bg-white/20 rounded-lg">
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="font-semibold text-lg">Ola, {pedido.representante.nome}!</p>
+                  <p className="text-white/90 text-sm">Cadastre-se como representante e responda a este pedido</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <a
+                  href={`/representante/login?redirect=/representante/pedidos/${pedidoId}`}
+                  className="px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-lg font-medium transition-colors"
+                >
+                  Ja tenho conta
+                </a>
+                <a
+                  href={`/representante/convite/${pedido.representante.codigo_acesso}`}
+                  className="inline-flex items-center gap-2 px-5 py-2 bg-white text-purple-600 hover:bg-purple-50 rounded-lg font-semibold transition-colors"
+                >
+                  Criar conta
+                  <ArrowRightIcon />
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="bg-gradient-to-r from-amber-500 to-orange-500 print:hidden">
+          <div className="max-w-5xl mx-auto px-4 py-4 sm:px-6">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3 text-white">
+                <div className="p-2 bg-white/20 rounded-lg">
+                  <ChatBubbleIcon />
+                </div>
+                <div>
+                  <p className="font-semibold text-lg">Quer responder a este pedido?</p>
+                  <p className="text-white/90 text-sm">Cadastre-se na FlowB2B e envie suas sugestoes comerciais</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <a
+                  href={`/fornecedor/login?redirect=/fornecedor/pedidos/${pedidoId}`}
+                  className="px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-lg font-medium transition-colors"
+                >
+                  Ja tenho conta
+                </a>
+                <a
+                  href={`/fornecedor/registro?redirect=/fornecedor/pedidos/${pedidoId}`}
+                  className="inline-flex items-center gap-2 px-5 py-2 bg-white text-amber-600 hover:bg-amber-50 rounded-lg font-semibold transition-colors"
+                >
+                  Criar conta gratis
+                  <ArrowRightIcon />
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Conteudo */}
+      <main className="max-w-5xl mx-auto px-4 py-6 sm:px-6" id="print-area">
+        {/* Cabecalho para impressao */}
+        <div className="hidden print:block mb-6 pb-4 border-b-2 border-gray-800">
+          <h1 className="text-2xl font-bold text-gray-900">
+            Pedido de Compra #{pedido.numero}
+          </h1>
+          <p className="text-lg text-gray-700">{pedido.fornecedor_nome}</p>
+          <p className="text-sm text-gray-500 mt-1">
+            Data: {formatDate(pedido.data)}
+            {pedido.data_prevista && ` | Previsao: ${formatDate(pedido.data_prevista)}`}
+          </p>
+        </div>
+
+        <div className="space-y-6">
+          {/* Informacoes do Pedido */}
+          <div className="bg-white rounded-xl border border-gray-200 p-6 print:border print:border-gray-300 print:shadow-none">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div>
+                <h3 className="text-sm font-medium text-gray-500 mb-1">Fornecedor</h3>
+                <p className="text-lg font-semibold text-gray-900">{pedido.fornecedor_nome}</p>
+              </div>
+              <div>
+                <h3 className="text-sm font-medium text-gray-500 mb-1">Data do Pedido</h3>
+                <p className="text-lg font-semibold text-gray-900">{formatDate(pedido.data)}</p>
+                {pedido.data_prevista && (
+                  <p className="text-sm text-gray-500">
+                    Previsao: {formatDate(pedido.data_prevista)}
+                  </p>
+                )}
+              </div>
+              <div>
+                <h3 className="text-sm font-medium text-gray-500 mb-1">Frete</h3>
+                <p className="text-lg font-semibold text-gray-900">
+                  {FRETE_LABELS[pedido.frete_por_conta || 'CIF'] || pedido.frete_por_conta}
+                </p>
+                {pedido.transportador && (
+                  <p className="text-sm text-gray-500">
+                    Transportador: {pedido.transportador}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Tabela de Itens */}
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden print:border print:border-gray-300">
+            <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+              <h3 className="text-lg font-semibold text-gray-900">Itens do Pedido</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Codigos
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Descricao
+                    </th>
+                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Unidade
+                    </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Qtd
+                    </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Valor Unit.
+                    </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Total
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {pedido.itens.map((item, index) => (
+                    <tr key={index} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 text-sm">
+                        {item.codigo_fornecedor && (
+                          <div className="font-medium text-gray-900">
+                            <span className="text-xs text-gray-400 mr-1">SKU:</span>
+                            {item.codigo_fornecedor}
+                          </div>
+                        )}
+                        {item.ean && (
+                          <div className="text-xs text-gray-500">
+                            <span className="text-gray-400 mr-1">EAN:</span>
+                            {item.ean}
+                          </div>
+                        )}
+                        {item.codigo_produto && (
+                          <div className="text-xs text-gray-400">
+                            <span className="mr-1">Lojista:</span>
+                            {item.codigo_produto}
+                          </div>
+                        )}
+                        {!item.codigo_fornecedor && !item.ean && !item.codigo_produto && '-'}
+                      </td>
+                      <td className="px-6 py-4 text-sm font-medium text-gray-900">
+                        {item.descricao}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-500 text-center">
+                        {item.unidade}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-900 text-right font-medium">
+                        {item.quantidade}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-900 text-right">
+                        {formatCurrency(item.valor)}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-900 text-right font-medium">
+                        {formatCurrency(item.quantidade * item.valor)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Resumo e Parcelas */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Parcelas */}
+            {pedido.parcelas && pedido.parcelas.length > 0 && (
+              <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+                  <h3 className="text-lg font-semibold text-gray-900">Parcelas</h3>
+                </div>
+                <div className="divide-y divide-gray-200">
+                  {pedido.parcelas.map((parcela, index) => (
+                    <div key={index} className="px-6 py-3 flex justify-between items-center">
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">
+                          Parcela {index + 1}
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          Vencimento: {formatDate(parcela.data_vencimento)}
+                        </p>
+                        {parcela.forma_pagamento_nome && (
+                          <p className="text-xs text-gray-500">
+                            {parcela.forma_pagamento_nome}
+                          </p>
+                        )}
+                      </div>
+                      <p className="text-sm font-semibold text-gray-900">
+                        {formatCurrency(parcela.valor)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Resumo Financeiro */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">Resumo</h3>
+              <div className="space-y-3">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Subtotal ({pedido.itens.length} itens)</span>
+                  <span className="font-medium">{formatCurrency(pedido.total_produtos)}</span>
+                </div>
+                {pedido.frete && pedido.frete > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Frete</span>
+                    <span className="font-medium">{formatCurrency(pedido.frete)}</span>
+                  </div>
+                )}
+                {pedido.desconto && pedido.desconto > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Desconto</span>
+                    <span className="font-medium text-green-600">-{formatCurrency(pedido.desconto)}</span>
+                  </div>
+                )}
+                <div className="border-t pt-3 flex justify-between">
+                  <span className="text-lg font-semibold text-gray-900">Total</span>
+                  <span className="text-lg font-bold text-[#336FB6]">{formatCurrency(pedido.total)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Observacoes */}
+          {pedido.observacoes && (
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">Observacoes</h3>
+              <p className="text-gray-700 whitespace-pre-wrap">{pedido.observacoes}</p>
+            </div>
+          )}
+        </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="max-w-5xl mx-auto px-4 py-6 sm:px-6 text-center text-sm text-gray-400 print:hidden">
+        Powered by FlowB2B
+      </footer>
+
+      {/* Estilos de impressao */}
+      <style jsx global>{`
+        @media print {
+          body * {
+            visibility: hidden;
+          }
+          #print-area, #print-area * {
+            visibility: visible;
+          }
+          #print-area {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            padding: 20px;
+          }
+          .print\\:hidden {
+            display: none !important;
+          }
+          #print-area .bg-white {
+            background: white !important;
+            box-shadow: none !important;
+          }
+          #print-area table {
+            width: 100% !important;
+            border-collapse: collapse !important;
+          }
+          #print-area th, #print-area td {
+            border: 1px solid #ddd !important;
+            padding: 8px !important;
+          }
+          #print-area th {
+            background-color: #f5f5f5 !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+        }
+      `}</style>
+
+      {/* Modal de convite para fornecedor */}
+      <FornecedorConviteModal
+        isOpen={showConviteModal}
+        onClose={handleCloseConviteModal}
+        pedidoId={pedidoId}
+        fornecedorNome={pedido.fornecedor_nome}
+      />
+
+      {/* Modal de convite para representante */}
+      {pedido.representante && (
+        <RepresentanteConviteModal
+          isOpen={showRepresentanteModal}
+          onClose={handleCloseConviteModal}
+          pedidoId={pedidoId}
+          codigoAcesso={pedido.representante.codigo_acesso}
+          representanteNome={pedido.representante.nome}
+        />
+      )}
+    </div>
+  )
+}

@@ -1,0 +1,78 @@
+name: 🔒 Security Checks
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Executar verificações semanais (domingo às 2h)
+    - cron: '0 2 * * 0'
+
+jobs:
+  security-audit:
+    name: 🛡️ Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.0'
+          cache: 'npm'
+
+      - name: 📚 Install dependencies
+        run: npm ci
+
+      - name: 🔍 NPM Audit
+        run: npm audit --audit-level=moderate
+
+      - name: 🕵️ Check for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+
+      - name: 🔐 Verify environment variables
+        run: |
+          echo "Checking for required environment variables..."
+          # Verificar se não há secrets hardcoded
+          if grep -r "supabase\.co" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" src/; then
+            echo "⚠️ WARNING: Found hardcoded Supabase URLs in source code"
+            exit 1
+          fi
+
+          if grep -r "eyJ" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" src/; then
+            echo "❌ ERROR: Found potential JWT tokens in source code"
+            exit 1
+          fi
+
+          echo "✅ No hardcoded secrets found"
+
+      - name: 🧪 RLS Security Test
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "🔍 Checking RLS implementation..."
+          # Verificar se queries usam empresa_id
+          if ! grep -r "empresa_id" --include="*.ts" --include="*.tsx" src/; then
+            echo "⚠️ WARNING: No empresa_id filtering found in source"
+          fi
+          echo "✅ RLS check completed"
+
+  dependency-review:
+    name: 📦 Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔍 Review dependencies
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
